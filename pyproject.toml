@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "goalie-pull"
+version = "0.0.1"
+description = "Bayesian inference for the optimal time to pull an NHL goalie"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+dependencies = [
+    "pandas>=2.0",
+    "pyarrow>=14",
+    "numpy>=1.26",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Modeling deps are heavier; install when you reach Phase 1.
+model = [
+    "pymc>=5.10",
+    "arviz>=0.17",
+    "scipy>=1.11",
+]
+viz = [
+    "matplotlib>=3.8",
+]
+app = [
+    "streamlit>=1.30",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

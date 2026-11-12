@@ -1,0 +1,25 @@
+# Data (raw downloads + processed artifacts are large / reproducible)
+data/raw/
+data/processed/
+*.zip
+*.csv
+*.parquet
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+
+# Notebooks outputs
+reports/figures/
+
+# OS
+.DS_Store
+
+# Local editor/app settings
+.claude/settings.local*.json
