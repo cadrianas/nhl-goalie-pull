@@ -1,27 +1,34 @@
 """Phase 1: optimal-stopping solver for the goalie-pull decision.
 
 Given per-second goal rates (from rates.py), we solve for the pull-time threshold
-that maximizes the probability of avoiding a regulation loss (reaching at least a
-tie). Because we carry full posterior draws of the rates through the solver, the
-output is a *distribution* over the optimal pull time per deficit -- the headline
-Bayesian result.
+that maximizes expected value. Posterior draws of the rates are carried through
+the solver, so the output is a *distribution* over the optimal pull time per
+deficit -- the headline Bayesian result.
 
-Model (baseline, time-homogeneous competing Poisson):
-    State = (deficit d, seconds remaining t). Each second, with the chosen action
-    (goalie IN or OUT) having rates (lam_for, lam_against):
-        score    (prob lam_for)      -> deficit d-1
-        concede  (prob lam_against)  -> deficit d+1
-        nothing                      -> deficit d, one second less
-    Value V(d, t) = P(reach tie-or-better by t=0).
-      V(d<=0, t) = 1   (tie achieved -> guaranteed at least the OT point)
-      V(d, 0)    = 0   for d >= 1
-      deficits beyond MAX_DEFICIT are treated as lost (V = 0).
-    At each (d, t) we take the action with the higher value; the optimal pull
-    threshold is the largest t at which pulling (OUT) is already optimal.
+Two utilities are supported:
 
-Simplification: V(d<=0)=1 treats reaching a tie as success (an OT point). The
-opponent pulling / re-scoring in the last seconds is ignored -- standard for the
-baseline and the thing the hierarchical model can later relax.
+  utility="tie_prob"  -- P(reach at least a tie in regulation). Simple; treats a
+     tie as an absorbing success and conceding-while-trailing as (nearly)
+     costless. Known to recommend pulling implausibly early.
+
+  utility="points"    -- expected NHL standings points (the Asness-Brown framing,
+     DEFAULT). Terminal payoffs: regulation win = 2, reach OT (tie) = 1.5
+     (1 guaranteed + a 50/50 OT point), regulation loss = 0. This REQUIRES
+     tracking the deficit going negative (the trailing team scoring again to WIN
+     in regulation) and tied/leading dynamics, which is why it can differ from
+     tie_prob rather than just rescaling it.
+
+Model (baseline, time-homogeneous competing Poisson): state = (signed deficit d,
+seconds remaining t). d>0 trailing, d=0 tied, d<0 leading. Each second, with the
+chosen action's rates (lam_for, lam_against): score -> d-1, concede -> d+1, else
+stay. The goalie is only ever pulled while trailing (d>=1); tied/leading states
+play the goalie in. Deeper than MAX_DEFICIT is treated as lost; a lead beyond
+MAX_LEAD as won.
+
+For leading states we reuse the trailing even-strength rates with roles swapped
+(being up k is, at even strength, the mirror of being down k); the tied rate is
+the average of the down-1 for/against rates. These are baseline approximations
+the hierarchical model can replace.
 """
 
 from __future__ import annotations
@@ -32,123 +39,149 @@ import numpy as np
 
 from . import rates as rates_mod
 
-HORIZON_S = 600   # solve the last 10 minutes, per second (rates ~constant within P3)
+HORIZON_S = 600            # solve the last 10 minutes, per second
 MAX_DEFICIT = rates_mod.MAX_DEFICIT
+MAX_LEAD = 3
+
+# Terminal standings-points payoff as a function of signed deficit d.
+def _points_payoff(d: int) -> float:
+    if d <= -1:
+        return 2.0       # leading at the buzzer -> regulation win
+    if d == 0:
+        return 1.5       # tied -> OT: 1 guaranteed + 50/50 for the 2nd point
+    return 0.0           # trailing -> regulation loss
 
 
 @dataclass
 class PullPolicy:
     deficit: int
+    utility: str
     threshold_draws: np.ndarray      # optimal pull time (sec remaining) per draw
-    tie_prob_optimal: np.ndarray     # P(tie) under optimal policy, per draw
-    tie_prob_never: np.ndarray       # P(tie) if goalie never pulled, per draw
+    value_optimal: np.ndarray        # E[value] under optimal policy, per draw
+    value_never: np.ndarray          # E[value] if goalie never pulled, per draw
 
     def summary(self) -> dict:
         t = self.threshold_draws
         return {
             "deficit": self.deficit,
+            "utility": self.utility,
             "pull_median_s": float(np.median(t)),
             "pull_90ci_s": (float(np.quantile(t, 0.05)),
                             float(np.quantile(t, 0.95))),
-            "tie_prob_optimal": float(np.median(self.tie_prob_optimal)),
-            "tie_prob_never": float(np.median(self.tie_prob_never)),
-            "tie_prob_gain": float(np.median(self.tie_prob_optimal
-                                             - self.tie_prob_never)),
+            "value_optimal": float(np.median(self.value_optimal)),
+            "value_never": float(np.median(self.value_never)),
+            "value_gain": float(np.median(self.value_optimal - self.value_never)),
         }
 
 
-def _draw_rates(post: dict, n: int, rng: np.random.Generator) -> dict:
-    """Posterior draws of all four rates for each deficit 1..MAX_DEFICIT."""
+def _even_strength_rates(post: dict, n: int, rng: np.random.Generator) -> dict:
+    """Signed-deficit -> (lam_for, lam_against) draws for goalie-IN play.
+
+    d>=1 trailing: straight from the fitted 'in' cells.
+    d<=-1 leading: mirror of being down |d| (for<->against swapped).
+    d==0 tied:     average of the down-1 for/against rates.
+    """
+    def cell(state, d, direction):
+        key = (state, d, direction)
+        return post[key].draws(n, rng) if key in post else np.full(n, 1e-6)
+
+    rates = {}
+    for d in range(1, MAX_DEFICIT + 1):          # trailing
+        rates[d] = (cell("in", d, "for"), cell("in", d, "against"))
+    for k in range(1, MAX_LEAD + 1):             # leading by k == down k, swapped
+        rates[-k] = (cell("in", k, "against"), cell("in", k, "for"))
+    tie = 0.5 * (cell("in", 1, "for") + cell("in", 1, "against"))
+    rates[0] = (tie.copy(), tie.copy())
+    return rates
+
+
+def _pulled_rates(post: dict, n: int, rng: np.random.Generator) -> dict:
     out = {}
     for d in range(1, MAX_DEFICIT + 1):
-        for state in ("in", "out"):
-            for direction in ("for", "against"):
-                key = (state, d, direction)
-                if key in post:
-                    out[key] = post[key].draws(n, rng)
-                else:  # cell never observed -> fall back to a tiny rate
-                    out[key] = np.full(n, 1e-6)
+        def cell(direction):
+            key = ("out", d, direction)
+            return post[key].draws(n, rng) if key in post else np.full(n, 1e-6)
+        out[d] = (cell("for"), cell("against"))
     return out
 
 
-def solve(post: dict, *, n_draws: int = 4000, horizon: int = HORIZON_S,
-          seed: int = 0, force_pull: bool = False) -> dict[int, PullPolicy]:
-    """Backward induction, vectorized over posterior draws.
-
-    Returns {deficit: PullPolicy}. If force_pull is True, the goalie is always
-    pulled (used to compute the 'never pull' counterfactual by inversion).
-    """
+def solve(post: dict, *, utility: str = "points", n_draws: int = 4000,
+          horizon: int = HORIZON_S, seed: int = 0) -> dict[int, PullPolicy]:
+    """Backward induction over the signed-deficit grid, vectorized over draws."""
     rng = np.random.default_rng(seed)
-    r = _draw_rates(post, n_draws, rng)
+    es = _even_strength_rates(post, n_draws, rng)     # goalie-in rates, all d
+    pulled = _pulled_rates(post, n_draws, rng)        # goalie-out rates, d>=1
 
-    # V[d] has shape (n_draws,). d indexes 0..MAX_DEFICIT+1; d<=0 -> 1, d>MAX -> 0.
-    def new_V():
-        V = {d: np.zeros(n_draws) for d in range(1, MAX_DEFICIT + 1)}
-        return V
+    grid = list(range(-MAX_LEAD, MAX_DEFICIT + 1))
+    won = 2.0 if utility == "points" else 1.0         # value past the lead cap
+    lost = 0.0
+    z = np.zeros(n_draws)
 
-    def value_table(policy: str):
-        """policy in {'optimal','in','out'}. Returns (V_by_t, action_out_by_t).
-        V_by_t[t][d], action recorded only for 'optimal'."""
-        V = new_V()                      # t = 0
-        thresholds_hit = {d: np.full(n_draws, np.nan) for d in range(1, MAX_DEFICIT + 1)}
-        for t in range(1, horizon + 1):
-            V_next = {}
-            for d in range(1, MAX_DEFICIT + 1):
-                V_dm1 = np.ones(n_draws) if d - 1 <= 0 else V[d - 1]          # tie or better
-                V_dp1 = np.zeros(n_draws) if d + 1 > MAX_DEFICIT else V[d + 1]  # deeper hole
-                V_same = V[d]
+    def payoff(d: int) -> np.ndarray:
+        if utility == "points":
+            return z + _points_payoff(d)
+        return z + (1.0 if d <= 0 else 0.0)
 
-                def val(state):
-                    lf = r[(state, d, "for")]
-                    la = r[(state, d, "against")]
-                    return lf * V_dm1 + la * V_dp1 + (1.0 - lf - la) * V_same
+    def below(V, d):  # value at deficit d-1 (we scored)
+        return V[d - 1] if (d - 1) in V else (z + won)
+    def above(V, d):  # value at deficit d+1 (we conceded)
+        return V[d + 1] if (d + 1) in V else (z + lost)
 
-                if policy == "optimal":
-                    v_in, v_out = val("in"), val("out")
-                    choose_out = v_out >= v_in
-                    V_next[d] = np.where(choose_out, v_out, v_in)
-                    # t increases through the loop, so overwriting on every
-                    # choose_out leaves the LARGEST t at which pulling is optimal
-                    # == the pull threshold (pull when time remaining hits it).
-                    thresholds_hit[d] = np.where(choose_out, t, thresholds_hit[d])
-                elif policy == "in":
-                    V_next[d] = val("in")
-                else:
-                    V_next[d] = val("out")
-            V = V_next
-        return V, thresholds_hit
+    def step(V, *, allow_pull: bool, track: dict | None, t: int):
+        Vn = {}
+        for d in grid:
+            Vb, Va, Vs = below(V, d), above(V, d), V[d]
+            lf_in, la_in = es[d]
+            v_in = lf_in * Vb + la_in * Va + (1 - lf_in - la_in) * Vs
+            if allow_pull and d >= 1:
+                lf_o, la_o = pulled[d]
+                v_out = lf_o * Vb + la_o * Va + (1 - lf_o - la_o) * Vs
+                choose_out = v_out >= v_in
+                Vn[d] = np.where(choose_out, v_out, v_in)
+                if track is not None:
+                    track[d] = np.where(choose_out, t, track[d])
+            else:
+                Vn[d] = v_in
+        return Vn
 
-    V_opt, thresholds = value_table("optimal")
-    V_never, _ = value_table("in")
+    # Optimal policy (pulling allowed while trailing) + threshold tracking.
+    V = {d: payoff(d) for d in grid}
+    thr = {d: np.zeros(n_draws) for d in range(1, MAX_DEFICIT + 1)}
+    for t in range(1, horizon + 1):
+        V = step(V, allow_pull=True, track=thr, t=t)
+    V_opt = V
 
-    policies = {}
-    for d in range(1, MAX_DEFICIT + 1):
-        thr = thresholds[d]
-        thr = np.where(np.isnan(thr), 0.0, thr)   # never worth pulling -> 0
-        policies[d] = PullPolicy(
-            deficit=d,
-            threshold_draws=thr,
-            tie_prob_optimal=V_opt[d],
-            tie_prob_never=V_never[d],
-        )
-    return policies
+    # Never-pull counterfactual.
+    V = {d: payoff(d) for d in grid}
+    for t in range(1, horizon + 1):
+        V = step(V, allow_pull=False, track=None, t=t)
+    V_never = V
+
+    return {
+        d: PullPolicy(deficit=d, utility=utility, threshold_draws=thr[d],
+                      value_optimal=V_opt[d], value_never=V_never[d])
+        for d in range(1, MAX_DEFICIT + 1)
+    }
 
 
-def run(seasons: list[int], *, n_draws: int = 4000, seed: int = 0):
+def run(seasons: list[int], *, utility: str = "points", n_draws: int = 4000,
+        seed: int = 0):
     table, post = rates_mod.build(seasons)
-    policies = solve(post, n_draws=n_draws, seed=seed)
+    policies = solve(post, utility=utility, n_draws=n_draws, seed=seed)
     return table, post, policies
 
 
 def _fmt(policies: dict[int, PullPolicy]) -> str:
-    lines = ["deficit  optimal pull (s remaining)   P(tie) optimal   P(tie) never   gain"]
+    u = next(iter(policies.values())).utility
+    vname = "E[points]" if u == "points" else "P(tie)"
+    lines = [f"deficit  optimal pull (s remaining)   {vname} optimal   {vname} never   gain"]
     for d, pol in sorted(policies.items()):
         s = pol.summary()
         lo, hi = s["pull_90ci_s"]
         lines.append(
             f"  down {d}   {s['pull_median_s']:>5.0f}s  (90% CI {lo:.0f}-{hi:.0f})"
-            f"        {s['tie_prob_optimal']:.3f}          {s['tie_prob_never']:.3f}"
-            f"      +{s['tie_prob_gain']:.3f}")
+            f"        {s['value_optimal']:.3f}          {s['value_never']:.3f}"
+            f"      +{s['value_gain']:.3f}")
     return "\n".join(lines)
 
 
@@ -156,9 +189,10 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--seasons", type=int, nargs="+", default=[2022, 2023, 2024])
+    ap.add_argument("--utility", choices=["points", "tie_prob"], default="points")
     ap.add_argument("--draws", type=int, default=4000)
     args = ap.parse_args()
-    table, post, policies = run(args.seasons, n_draws=args.draws)
+    table, post, policies = run(args.seasons, utility=args.utility, n_draws=args.draws)
     print(rates_mod._fmt(post))
     print()
     print(_fmt(policies))

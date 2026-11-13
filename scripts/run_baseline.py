@@ -37,11 +37,14 @@ def actual_pull_times(seasons: list[int]) -> pd.DataFrame:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seasons", type=int, nargs="+", default=[2022, 2023, 2024])
+    ap.add_argument("--utility", choices=["points", "tie_prob"], default="points")
     ap.add_argument("--draws", type=int, default=4000)
     args = ap.parse_args()
 
-    table, post, policies = decision.run(args.seasons, n_draws=args.draws)
+    table, post, policies = decision.run(args.seasons, utility=args.utility,
+                                         n_draws=args.draws)
     actual = actual_pull_times(args.seasons)
+    vlabel = "E[points]" if args.utility == "points" else "P(tie)"
 
     print("=== fitted rates (per 60s) ===")
     print(rates_mod._fmt(post))
@@ -49,9 +52,9 @@ def main() -> int:
     print(decision._fmt(policies))
 
     # Compare optimal vs actual coach behavior.
-    print("\n=== optimal vs actual coach pull time (seconds remaining) ===")
+    print(f"\n=== optimal vs actual coach pull time (seconds remaining; utility={args.utility}) ===")
     rows = []
-    print("deficit   optimal median (90% CI)     actual median [IQR]      games")
+    print(f"deficit   optimal median (90% CI)     actual median [IQR]     {vlabel} gain   games")
     for d, pol in sorted(policies.items()):
         s = pol.summary()
         a = actual[actual["deficit"] == d]["pull_start_s"]
@@ -59,19 +62,19 @@ def main() -> int:
         aq1, aq3 = (float(a.quantile(0.25)), float(a.quantile(0.75))) if len(a) else (np.nan, np.nan)
         lo, hi = s["pull_90ci_s"]
         print(f"  down {d}    {s['pull_median_s']:>4.0f}s ({lo:.0f}-{hi:.0f})"
-              f"            {amed:>4.0f}s [{aq1:.0f}-{aq3:.0f}]          {len(a)}")
+              f"            {amed:>4.0f}s [{aq1:.0f}-{aq3:.0f}]         +{s['value_gain']:.3f}        {len(a)}")
         rows.append({"deficit": d, "optimal_s": s["pull_median_s"],
                      "optimal_lo": lo, "optimal_hi": hi,
                      "actual_med_s": amed, "actual_q1": aq1, "actual_q3": aq3,
-                     "tie_gain": s["tie_prob_gain"], "n_games": int(len(a))})
+                     "value_gain": s["value_gain"], "n_games": int(len(a))})
     results = pd.DataFrame(rows)
 
-    _plot(results, policies, actual)
-    _write_md(results, table, post)
+    _plot(results, policies, actual, vlabel)
+    _write_md(results, table, post, args.utility, vlabel)
     return 0
 
 
-def _plot(results, policies, actual):
+def _plot(results, policies, actual, vlabel="value"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -113,18 +116,20 @@ def _plot(results, policies, actual):
     print(f"\n[plot] wrote {out}")
 
 
-def _write_md(results, table, post):
+def _write_md(results, table, post, utility="points", vlabel="E[points]"):
+    util_desc = ("expected NHL standings points (reg win 2, OT/tie 1.5, reg loss 0)"
+                 if utility == "points" else "P(reach at least a tie in regulation)")
     lines = ["# Baseline results (Phase 1)\n",
              "Conjugate Gamma-Poisson rates + backward-induction optimal stopping.",
-             "Utility = P(reach at least a tie in regulation).\n",
+             f"Utility = {util_desc}.\n",
              "## Optimal vs. actual pull time (seconds remaining)\n",
-             "| deficit | model optimal (90% CI) | actual coach median | tie-prob gain | games |",
+             f"| deficit | model optimal (90% CI) | actual coach median | {vlabel} gain | games |",
              "|---|---|---|---|---|"]
     for _, r in results.iterrows():
         lines.append(
             f"| down {int(r['deficit'])} | {r['optimal_s']:.0f}s "
             f"({r['optimal_lo']:.0f}-{r['optimal_hi']:.0f}) | "
-            f"{r['actual_med_s']:.0f}s | +{r['tie_gain']:.3f} | {int(r['n_games'])} |")
+            f"{r['actual_med_s']:.0f}s | +{r['value_gain']:.3f} | {int(r['n_games'])} |")
     lines.append("\n## Fitted rates (per 60s)\n```")
     lines.append(rates_mod._fmt(post))
     lines.append("```")

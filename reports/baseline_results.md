@@ -1,15 +1,15 @@
 # Baseline results (Phase 1)
 
 Conjugate Gamma-Poisson rates + backward-induction optimal stopping.
-Utility = P(reach at least a tie in regulation).
+Utility = expected NHL standings points (reg win 2, OT/tie 1.5, reg loss 0).
 
 ## Optimal vs. actual pull time (seconds remaining)
 
-| deficit | model optimal (90% CI) | actual coach median | tie-prob gain | games |
+| deficit | model optimal (90% CI) | actual coach median | E[points] gain | games |
 |---|---|---|---|---|
-| down 1 | 475s (389-600) | 119s | +0.134 | 1628 |
-| down 2 | 410s (351-481) | 163s | +0.068 | 1389 |
-| down 3 | 386s (310-472) | 252s | +0.027 | 376 |
+| down 1 | 404s (342-498) | 119s | +0.189 | 1628 |
+| down 2 | 394s (339-459) | 163s | +0.096 | 1389 |
+| down 3 | 377s (304-462) | 252s | +0.039 | 376 |
 
 ## Fitted rates (per 60s)
 ```
