@@ -1,9 +1,11 @@
 # Data (raw downloads + processed artifacts are large / reproducible)
 data/raw/
-data/processed/
+data/processed/*
 *.zip
 *.csv
 *.parquet
+# ...except the tiny precomputed rate table the deployed app loads.
+!data/processed/rate_table.csv
 
 # Python
 .venv/

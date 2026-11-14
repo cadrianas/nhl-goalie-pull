@@ -16,18 +16,25 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 from goalie_pull import decision, rates as rates_mod  # noqa: E402
 
 SEASONS = [2022, 2023, 2024]
 MAXD = rates_mod.MAX_DEFICIT
+RATE_TABLE = ROOT / "data" / "processed" / "rate_table.csv"
 
 
 @st.cache_resource(show_spinner="Fitting goal-rate posteriors…")
 def load_model(utility: str):
-    _, post = rates_mod.build(SEASONS)
+    # Ship a tiny precomputed rate table so the deployed app needs no raw data.
+    if RATE_TABLE.exists():
+        post = rates_mod.fit(pd.read_csv(RATE_TABLE))
+    else:
+        _, post = rates_mod.build(SEASONS)
     policies = decision.solve(post, utility=utility, n_draws=4000)
     opt_thr = {d: policies[d].summary()["pull_median_s"] for d in policies}
     opt_ci = {d: policies[d].summary()["pull_90ci_s"] for d in policies}
