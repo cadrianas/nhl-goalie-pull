@@ -52,28 +52,48 @@ notebooks/         EDA + narrative analysis
 
 ```bash
 python3.12 -m venv .venv
-./.venv/bin/pip install -e .            # core (ingest) deps
-./.venv/bin/pip install -e '.[model,viz]'   # when you reach Phase 1
+./.venv/bin/pip install -e '.[model,viz,app]'
 ```
 
 ## Usage
 
 ```bash
-python -m goalie_pull.ingest --season 2024   # one season
-python -m goalie_pull.ingest --all           # all DEFAULT_SEASONS
+# 1. data pipeline
+python -m goalie_pull.ingest --season 2022 --season 2023 --season 2024
+python -m goalie_pull.exposure --season 2022   # + 2023, 2024 (NHL play-by-play)
+
+# 2. baseline model + optimal pull curve
+python scripts/run_baseline.py --seasons 2022 2023 2024
+
+# 3. validation + per-team cost / hierarchical / time-varying
+python -m goalie_pull.validate
+python scripts/run_hierarchical.py
+python scripts/run_timevarying.py
+
+# 4. live tool
+streamlit run app/goalie_pull_app.py
 ```
 
-Writes `data/processed/shots.parquet` and prints a sanity summary.
+## Key findings (2022–24)
+
+1. **Coaches pull far too late.** The expected-points-optimal pull time is ~6:44
+   remaining when down one; coaches' median is ~2:00.
+2. **It costs ~0.54 expected standings points per team per season** (NSH worst
+   ~0.87, TOR/BOS best ~0.29).
+3. **It's a decision problem, not a talent problem.** A hierarchical model shows
+   team heterogeneity in the pulled rates is small; team-specific optimal pull
+   times barely move (±~28s), dwarfed by the ~350s gap to actual behavior.
+4. **The goalie-in scoring rate is strongly time-inhomogeneous** (it collapses
+   over the final ~7 min), so the constant-rate assumption used across the
+   literature is wrong — but modeling it shifts the optimum only +12–25s. The
+   aggressive-pull conclusion is robust to every refinement.
+
+Figures in `reports/figures/`; write-ups in `reports/*.md`.
 
 ## Status
 
-Phase 0a (ingest) complete and verified on 2024. Next: Phase 0b, reconstruct
-empty-net *intervals* to get exposure time — the denominator for the Poisson
-rates — then the baseline Gamma–Poisson model.
-
-## The key modeling decisions (open)
-
-- **Event = raw goals vs. xG-weighted shots.** Raw empty-net goals are sparse;
-  leaning toward modeling the xG-weighted shot process, with raw goals for validation.
-- **Utility = win probability vs. expected standings points** (reg win 2, OT loss 1).
-  Supported as alternate terminal-value functions in the solver.
+Phases 0–4 complete: data pipeline, baseline Gamma–Poisson + optimal-stopping
+solver (expected-points utility), held-out validation, per-team cost analysis,
+hierarchical PyMC rate model, time-inhomogeneous hazards, and a Streamlit live
+tool. Possible extensions: more seasons (2015–21) to resolve team effects,
+time-varying pulled hazards, and xG-weighted events.
