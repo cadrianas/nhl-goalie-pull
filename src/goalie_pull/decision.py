@@ -106,8 +106,15 @@ def _pulled_rates(post: dict, n: int, rng: np.random.Generator) -> dict:
 
 
 def solve(post: dict, *, utility: str = "points", n_draws: int = 4000,
-          horizon: int = HORIZON_S, seed: int = 0) -> dict[int, PullPolicy]:
-    """Backward induction over the signed-deficit grid, vectorized over draws."""
+          horizon: int = HORIZON_S, seed: int = 0,
+          tv_in: dict | None = None) -> dict[int, PullPolicy]:
+    """Backward induction over the signed-deficit grid, vectorized over draws.
+
+    tv_in (optional): dict d -> (lf_tod, la_tod), each (n_draws, horizon+1), giving
+    TIME-VARYING goalie-in rates for trailing deficits d>=1 (Phase 3b). When given,
+    they replace the constant goalie-in rates for d>=1; tied/leading states keep
+    the constant rates.
+    """
     rng = np.random.default_rng(seed)
     es = _even_strength_rates(post, n_draws, rng)     # goalie-in rates, all d
     pulled = _pulled_rates(post, n_draws, rng)        # goalie-out rates, d>=1
@@ -131,7 +138,10 @@ def solve(post: dict, *, utility: str = "points", n_draws: int = 4000,
         Vn = {}
         for d in grid:
             Vb, Va, Vs = below(V, d), above(V, d), V[d]
-            lf_in, la_in = es[d]
+            if tv_in is not None and d >= 1:
+                lf_in, la_in = tv_in[d][0][:, t], tv_in[d][1][:, t]
+            else:
+                lf_in, la_in = es[d]
             v_in = lf_in * Vb + la_in * Va + (1 - lf_in - la_in) * Vs
             if allow_pull and d >= 1:
                 lf_o, la_o = pulled[d]
