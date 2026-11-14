@@ -164,6 +164,45 @@ def solve(post: dict, *, utility: str = "points", n_draws: int = 4000,
     }
 
 
+def evaluate_thresholds(post: dict, thresholds: dict[int, float], *,
+                        utility: str = "points", n_draws: int = 4000,
+                        horizon: int = HORIZON_S, seed: int = 0) -> dict[int, np.ndarray]:
+    """E[value] draws for a FIXED pull policy: pull iff t <= thresholds[d].
+
+    A deficit absent from `thresholds` (or mapped to 0) is never pulled. Used to
+    score a coach's actual behavior against the optimal policy on a common
+    starting state (down d with `horizon` seconds left)."""
+    rng = np.random.default_rng(seed)
+    es = _even_strength_rates(post, n_draws, rng)
+    pulled = _pulled_rates(post, n_draws, rng)
+    grid = list(range(-MAX_LEAD, MAX_DEFICIT + 1))
+    won = 2.0 if utility == "points" else 1.0
+    z = np.zeros(n_draws)
+
+    def payoff(d):
+        if utility == "points":
+            return z + _points_payoff(d)
+        return z + (1.0 if d <= 0 else 0.0)
+
+    def below(V, d):
+        return V[d - 1] if (d - 1) in V else (z + won)
+    def above(V, d):
+        return V[d + 1] if (d + 1) in V else z
+
+    V = {d: payoff(d) for d in grid}
+    for t in range(1, horizon + 1):
+        Vn = {}
+        for d in grid:
+            Vb, Va, Vs = below(V, d), above(V, d), V[d]
+            if d >= 1 and t <= thresholds.get(d, 0):
+                lf, la = pulled[d]
+            else:
+                lf, la = es[d]
+            Vn[d] = lf * Vb + la * Va + (1 - lf - la) * Vs
+        V = Vn
+    return {d: V[d] for d in range(1, MAX_DEFICIT + 1)}
+
+
 def run(seasons: list[int], *, utility: str = "points", n_draws: int = 4000,
         seed: int = 0):
     table, post = rates_mod.build(seasons)
