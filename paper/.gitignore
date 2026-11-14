@@ -1,0 +1,9 @@
+# LaTeX build artifacts (keep main.tex, refs.bib, figures/, main.pdf)
+*.aux
+*.log
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.out
+*.synctex.gz
